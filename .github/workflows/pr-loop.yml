@@ -1,0 +1,174 @@
+name: PR loop
+
+# discover（App 令牌）→ sandbox（零权限、零 secret，实际运行 PR 代码）→ review（App 令牌 + 模型）
+on:
+  schedule:
+    - cron: "37 * * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: pr-loop
+  cancel-in-progress: false
+
+env:
+  DRY_RUN: ${{ vars.DRY_RUN || 'true' }}
+  RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  discover:
+    if: vars.BOT_ENABLED == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    outputs:
+      matrix: ${{ steps.d.outputs.matrix }}
+      has_work: ${{ steps.d.outputs.has_work }}
+      has_sandbox: ${{ steps.d.outputs.has_sandbox }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - id: bot
+        uses: ./.github/actions/bot-setup
+        with:
+          app-id: ${{ vars.WF_APP_ID }}
+          private-key: ${{ secrets.WF_APP_PRIVATE_KEY }}
+      - id: d
+        run: python -m wf.loops.pr_review discover --out out
+        env:
+          GH_TOKEN: ${{ steps.bot.outputs.token }}
+          BOT_LOGIN: ${{ steps.bot.outputs.bot-login }}
+      - uses: actions/upload-artifact@v7
+        with:
+          name: pr-queue
+          path: out/pr-queue.json
+          retention-days: 7
+
+  # ⚠ 这里运行的是外部提交的代码：不给任何权限、不引用任何 secret、不用 App 令牌。
+  sandbox:
+    needs: discover
+    if: needs.discover.outputs.has_sandbox == 'true'
+    name: sandbox ${{ matrix.key }}
+    permissions: {}
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        include: ${{ fromJSON(needs.discover.outputs.matrix) }}
+    runs-on: ${{ matrix.runs_on }}
+    timeout-minutes: 60
+    steps:
+      - if: matrix.node != ''
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node }}
+      - if: matrix.java != ''
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: ${{ matrix.java }}
+      - if: matrix.python != ''
+        uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python }}
+      - if: matrix.uv
+        uses: astral-sh/setup-uv@v7
+      - name: Fetch PR head (anonymous clone)
+        env:
+          REPO: ${{ matrix.repo }}
+          NUMBER: ${{ matrix.number }}
+          SHA: ${{ matrix.sha }}
+          SUBMODULES: ${{ matrix.submodules }}
+          LFS: ${{ matrix.lfs }}
+        run: |
+          mkdir -p out
+          git init -q target && cd target
+          git remote add origin "https://github.com/${REPO}.git"
+          git fetch -q --depth 50 origin "pull/${NUMBER}/head"
+          git checkout -q --detach "$SHA" 2>/dev/null || git checkout -q --detach FETCH_HEAD
+          git rev-parse HEAD > ../out/sha
+          if [ "$SUBMODULES" = "true" ]; then git submodule update --init --depth 1 --recursive; fi
+          if [ "$LFS" = "true" ]; then git lfs install --local && git lfs pull; fi
+      - name: Run check (untrusted code)
+        id: check
+        continue-on-error: true
+        working-directory: target
+        env:
+          CHECK_RUN: ${{ matrix.run }}
+        run: bash -eo pipefail -c "$CHECK_RUN" > ../out/log.txt 2>&1
+      - name: Record result
+        if: always()
+        env:
+          OUTCOME: ${{ steps.check.outcome }}
+        run: |
+          if [ "$OUTCOME" = "success" ]; then echo 0 > out/exit_code; else echo "1 ($OUTCOME)" > out/exit_code; fi
+          touch out/log.txt
+          tail -c 200000 out/log.txt > out/log.tmp && mv out/log.tmp out/log.txt
+          tail -n 80 out/log.txt
+      - if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: sandbox-${{ matrix.key }}
+          path: out/
+          retention-days: 7
+
+  review:
+    needs: [discover, sandbox]
+    if: always() && needs.discover.result == 'success' && needs.discover.outputs.has_work == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - id: bot
+        uses: ./.github/actions/bot-setup
+        with:
+          app-id: ${{ vars.WF_APP_ID }}
+          private-key: ${{ secrets.WF_APP_PRIVATE_KEY }}
+      - uses: actions/download-artifact@v8
+        with:
+          name: pr-queue
+          path: out
+      # 沙箱产物是不可信数据：只当文本读，不执行
+      - if: needs.discover.outputs.has_sandbox == 'true'
+        uses: actions/download-artifact@v8
+        with:
+          pattern: sandbox-*
+          path: sandbox
+      - run: python -m wf.loops.pr_review review --queue out/pr-queue.json --sandbox sandbox
+        env:
+          GH_TOKEN: ${{ steps.bot.outputs.token }}
+          BOT_LOGIN: ${{ steps.bot.outputs.bot-login }}
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+
+  alert:
+    needs: [discover, review]
+    if: failure()
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - id: bot
+        uses: ./.github/actions/bot-setup
+        with:
+          app-id: ${{ vars.WF_APP_ID }}
+          private-key: ${{ secrets.WF_APP_PRIVATE_KEY }}
+      - run: python -m wf.loops.alert --workflow "$WORKFLOW"
+        env:
+          DRY_RUN: "false"
+          WORKFLOW: ${{ github.workflow }}
+          GH_TOKEN: ${{ steps.bot.outputs.token }}
+          BOT_LOGIN: ${{ steps.bot.outputs.bot-login }}

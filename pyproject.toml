@@ -1,0 +1,10 @@
+[project]
+name = "wf"
+version = "0.1.0"
+description = "GitHub 仓库自动维护 loop（issue 分诊 / PR 审查 / 审批 / 修复 / 清理）"
+requires-python = ">=3.12"
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
+pythonpath = ["."]

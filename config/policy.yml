@@ -1,0 +1,28 @@
+# 动作分级。模型只能从固定枚举里选"结论"，具体做什么动作由 wf/policy.py 按这里映射。
+# 合并 / 发版 / 拉黑 / 清理改动 永远需要维护者 /approve，这里没有开关可以放开。
+
+issue:
+  max_per_run: 20
+  min_confidence: 0.5          # 低于此值不公开回复，只打 bot:needs-human
+  close_wontfix: true
+  close_relay_ad: true
+  allowed_labels: [bug, enhancement, documentation, question]
+
+pr:
+  max_per_run: 5
+  max_diff_chars: 150000       # 约 4 万 token；超过则不让模型下结论，转人工
+  sensitive_prefixes: [".github/", "Scripts/", "scripts/", "Vendor/"]
+
+fix:
+  max_per_run: 2
+  forbidden_prefixes: [".github/"]
+
+cleanup:
+  lookback_days: 7
+  max_diff_chars: 80000
+
+blacklist:
+  violation_threshold: 3       # 累计被判为低质量而关闭的 PR 数，达到后提出拉黑建议
+
+reply:
+  max_chars: 3000

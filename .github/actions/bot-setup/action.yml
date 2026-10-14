@@ -1,0 +1,35 @@
+name: bot-setup
+description: 安装 Python 依赖并换取 GitHub App 安装令牌（只在不运行外部代码的 job 里用）
+inputs:
+  app-id:
+    required: true
+  private-key:
+    required: true
+outputs:
+  token:
+    value: ${{ steps.app.outputs.token }}
+  bot-login:
+    value: ${{ steps.app.outputs.app-slug }}[bot]
+  bot-user-id:
+    value: ${{ steps.uid.outputs.id }}
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@v7
+      with:
+        python-version: "3.12"
+    - shell: bash
+      run: pip install --disable-pip-version-check -q -r requirements.txt
+    - id: app
+      uses: actions/create-github-app-token@v3
+      with:
+        app-id: ${{ inputs.app-id }}
+        private-key: ${{ inputs.private-key }}
+        owner: IsaacHuo
+        repositories: workflow,maptoposter,Myleafy,familiar
+    - id: uid
+      shell: bash
+      env:
+        GH_TOKEN: ${{ steps.app.outputs.token }}
+        SLUG: ${{ steps.app.outputs.app-slug }}
+      run: echo "id=$(gh api "/users/${SLUG}[bot]" --jq .id)" >> "$GITHUB_OUTPUT"

@@ -1,0 +1,158 @@
+name: fix loop
+
+# discover（App 令牌）→ fix（模型密钥，无 GitHub 写权限，opencode 禁用 bash/网络）→ publish（App 令牌，不跑外部代码）
+# 产出的 PR 再走 PR loop 的沙箱验证和审查，维护者 /approve 后才合并。
+on:
+  schedule:
+    - cron: "5 */3 * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: fix-loop
+  cancel-in-progress: false
+
+env:
+  DRY_RUN: ${{ vars.DRY_RUN || 'true' }}
+  RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  discover:
+    if: vars.BOT_ENABLED == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      matrix: ${{ steps.d.outputs.matrix }}
+      has_work: ${{ steps.d.outputs.has_work }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - id: bot
+        uses: ./.github/actions/bot-setup
+        with:
+          app-id: ${{ vars.WF_APP_ID }}
+          private-key: ${{ secrets.WF_APP_PRIVATE_KEY }}
+      - id: d
+        run: python -m wf.loops.fix discover --out out/fix
+        env:
+          GH_TOKEN: ${{ steps.bot.outputs.token }}
+          BOT_LOGIN: ${{ steps.bot.outputs.bot-login }}
+      - if: steps.d.outputs.has_work == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: fix-items
+          path: out/fix/
+          retention-days: 7
+
+  fix:
+    needs: discover
+    if: needs.discover.outputs.has_work == 'true'
+    name: fix ${{ matrix.key }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.discover.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - run: pip install --disable-pip-version-check -q -r requirements.txt
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+      - run: npm install -g opencode-ai@1.19.0
+      - uses: actions/download-artifact@v8
+        with:
+          name: fix-items
+          path: items
+      - name: Clone target (anonymous, default branch)
+        env:
+          REPO: ${{ matrix.repo }}
+          BRANCH: ${{ matrix.branch }}
+          GIT_LFS_SKIP_SMUDGE: "1"
+        run: git clone -q --depth 1 --branch "$BRANCH" "https://github.com/${REPO}.git" target
+      - run: python -m wf.loops.fix prompt --item "items/${KEY}.json" > prompt.md
+        env:
+          KEY: ${{ matrix.key }}
+      - name: opencode
+        continue-on-error: true
+        working-directory: target
+        env:
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+          OPENCODE_CONFIG: ${{ github.workspace }}/config/opencode.json
+        run: timeout 40m opencode run "$(cat ../prompt.md)" < /dev/null
+      - run: python -m wf.loops.fix collect --item "items/${KEY}.json" --workdir target --out "result/${KEY}"
+        env:
+          KEY: ${{ matrix.key }}
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}   # 仅用于确认补丁里没有泄露该值
+      - uses: actions/upload-artifact@v7
+        with:
+          name: fix-result-${{ matrix.key }}
+          path: result/
+          retention-days: 7
+
+  publish:
+    needs: [discover, fix]
+    if: always() && needs.discover.outputs.has_work == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - id: bot
+        uses: ./.github/actions/bot-setup
+        with:
+          app-id: ${{ vars.WF_APP_ID }}
+          private-key: ${{ secrets.WF_APP_PRIVATE_KEY }}
+      - uses: actions/download-artifact@v8
+        continue-on-error: true
+        with:
+          pattern: fix-result-*
+          path: fix-results
+          merge-multiple: true
+      - run: python -m wf.loops.fix publish --results fix-results
+        env:
+          GH_TOKEN: ${{ steps.bot.outputs.token }}
+          BOT_LOGIN: ${{ steps.bot.outputs.bot-login }}
+          BOT_USER_ID: ${{ steps.bot.outputs.bot-user-id }}
+          FIX_MATRIX: ${{ needs.discover.outputs.matrix }}
+
+  alert:
+    needs: [discover, publish]
+    if: failure()
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - id: bot
+        uses: ./.github/actions/bot-setup
+        with:
+          app-id: ${{ vars.WF_APP_ID }}
+          private-key: ${{ secrets.WF_APP_PRIVATE_KEY }}
+      - run: python -m wf.loops.alert --workflow "$WORKFLOW"
+        env:
+          DRY_RUN: "false"
+          WORKFLOW: ${{ github.workflow }}
+          GH_TOKEN: ${{ steps.bot.outputs.token }}
+          BOT_LOGIN: ${{ steps.bot.outputs.bot-login }}

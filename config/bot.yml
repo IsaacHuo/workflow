@@ -1,0 +1,13 @@
+# 全局设置。凭证不放这里：OPENCODE_API_KEY / WF_APP_PRIVATE_KEY 只在 GitHub Secrets。
+owner: IsaacHuo
+maintainer: IsaacHuo          # 唯一能 /approve /reject 的账号
+control_repo: IsaacHuo/workflow
+control_default_branch: main
+state_branch: bot-state       # 跨轮次状态（违规计数、游标、事件）所在的孤立分支
+
+llm:
+  # OpenCode Go 订阅的端点。按 Go 文档要求：自定义 User-Agent + 每段对话一个稳定的 x-opencode-session
+  base_url: https://opencode.ai/zen/go/v1
+  model: deepseek-v4.1-flash
+  user_agent: isaachuo-workflow-bot/0.1
+  timeout_seconds: 180

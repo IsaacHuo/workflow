@@ -1,0 +1,33 @@
+name: daily digest
+
+on:
+  schedule:
+    - cron: "0 1 * * *"     # 北京时间 09:00
+  workflow_dispatch:
+
+permissions: {}
+
+env:
+  DRY_RUN: ${{ vars.DRY_RUN || 'true' }}
+  RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+jobs:
+  digest:
+    if: vars.BOT_ENABLED == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - id: bot
+        uses: ./.github/actions/bot-setup
+        with:
+          app-id: ${{ vars.WF_APP_ID }}
+          private-key: ${{ secrets.WF_APP_PRIVATE_KEY }}
+      - run: python -m wf.loops.digest
+        env:
+          GH_TOKEN: ${{ steps.bot.outputs.token }}
+          BOT_LOGIN: ${{ steps.bot.outputs.bot-login }}

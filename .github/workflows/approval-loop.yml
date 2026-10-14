@@ -1,0 +1,60 @@
+name: approval loop
+
+# 只认 IsaacHuo 本人（OWNER）的 /approve、/reject 评论
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: approval-loop
+  cancel-in-progress: false
+
+env:
+  DRY_RUN: ${{ vars.DRY_RUN || 'true' }}
+  RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+jobs:
+  approve:
+    if: vars.BOT_ENABLED == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - id: bot
+        uses: ./.github/actions/bot-setup
+        with:
+          app-id: ${{ vars.WF_APP_ID }}
+          private-key: ${{ secrets.WF_APP_PRIVATE_KEY }}
+      - run: python -m wf.loops.approval
+        env:
+          GH_TOKEN: ${{ steps.bot.outputs.token }}
+          BOT_LOGIN: ${{ steps.bot.outputs.bot-login }}
+
+  alert:
+    needs: [approve]
+    if: failure()
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - id: bot
+        uses: ./.github/actions/bot-setup
+        with:
+          app-id: ${{ vars.WF_APP_ID }}
+          private-key: ${{ secrets.WF_APP_PRIVATE_KEY }}
+      - run: python -m wf.loops.alert --workflow "$WORKFLOW"
+        env:
+          DRY_RUN: "false"
+          WORKFLOW: ${{ github.workflow }}
+          GH_TOKEN: ${{ steps.bot.outputs.token }}
+          BOT_LOGIN: ${{ steps.bot.outputs.bot-login }}

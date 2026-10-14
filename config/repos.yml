@@ -1,0 +1,122 @@
+# 被管理的仓库。checks 是 PR 沙箱里实际跑的验证，命令取自各仓库自身的 CI / AGENTS.md。
+#
+# check 字段：
+#   id        唯一名
+#   runs_on   runner 标签
+#   paths     路径前缀列表；PR 改动命中任一前缀才跑。空列表 = 每次都跑
+#   tools     需要的工具链：node / java / python 写版本号，uv 写 true
+#   run       bash 脚本，在仓库根目录执行
+#
+# release.mode：
+#   tag   合并后起草 Release（只打 tag，不发任何包），你 /approve 后发布
+#   none  不由机器人发版（例如版本号跟 App Store 走的仓库），合并后只回复
+defaults:
+  merge_method: squash
+  force_all_prefixes: [".github/workflows/"]   # 改到这些路径时所有 check 都跑
+
+repos:
+  - name: maptoposter
+    default_branch: main
+    stack: Python 3.12 (uv) + React/Vite (pnpm)
+    has_tests: true
+    # 注意：main 的推送会触发 Hugging Face Space 部署，合并 = 上线
+    release:
+      mode: tag
+      first_version: v0.2.0     # pyproject 当前版本，仓库还没有 tag
+    checks:
+      - id: python
+        runs_on: ubuntu-24.04
+        paths: []
+        tools: { uv: true, python: "3.12" }
+        run: |
+          uv sync --all-groups
+          uv run ruff check .
+          uv run pytest -m "not network"
+      - id: frontend
+        runs_on: ubuntu-24.04
+        paths: ["frontend/"]
+        tools: { node: "24" }
+        run: |
+          corepack enable
+          corepack pnpm --dir frontend install --frozen-lockfile
+          corepack pnpm --dir frontend lint
+          corepack pnpm --dir frontend test
+          corepack pnpm --dir frontend build
+
+  - name: Myleafy
+    default_branch: main
+    stack: iOS (Swift) + Android (Kotlin) + Cloudflare backend + site
+    has_tests: true
+    release:
+      mode: none                # 版本由 release.yml 按 App Store 实际发版记录，机器人不打 tag
+    checks:
+      - id: safety
+        runs_on: ubuntu-24.04
+        paths: []
+        tools: { python: "3.12" }
+        run: |
+          python -m unittest discover -s scripts -p 'test_ci_*.py'
+          bash scripts/check-layer-boundaries.sh
+      - id: backend
+        runs_on: ubuntu-24.04
+        paths: ["backend/", "leafy/", "contracts/", "site/src/admin/"]
+        tools: { node: "25.6.1", python: "3.12" }
+        run: |
+          cd backend
+          npm ci
+          npm run typecheck
+          npm run check:contracts
+          npm test
+          python -m unittest discover -s scripts -p 'test_*.py'
+      - id: site
+        runs_on: ubuntu-24.04
+        paths: ["site/", "backend/", "contracts/"]
+        tools: { node: "22.23.1" }
+        run: |
+          cd site
+          npm ci
+          npm test
+          npm run build
+      - id: android
+        runs_on: ubuntu-24.04
+        paths: ["android/", "contracts/"]
+        tools: { java: "17" }
+        run: |
+          cd android
+          ./gradlew :app:assembleDebug :app:testDebugUnitTest
+      - id: ios
+        runs_on: macos-26
+        paths: ["leafy/", "leafyTests/", "leafyWidget/", "LeafyWidgetShared/", "LeafyShareExtension/",
+                "LeafyExternalImportShared/", "Config/", "leafy.xcodeproj/", "contracts/"]
+        tools: {}
+        run: |
+          export DEVELOPER_DIR=/Applications/Xcode_26.6.app/Contents/Developer
+          xcodebuild -quiet build -project leafy.xcodeproj -scheme leafy -configuration Debug \
+            -destination 'generic/platform=iOS Simulator' IPHONEOS_DEPLOYMENT_TARGET=17.0 \
+            COMPILER_INDEX_STORE_ENABLE=NO CODE_SIGNING_ALLOWED=NO
+
+  - name: familiar
+    default_branch: main
+    stack: iOS (SwiftUI)，含 git submodule 与 LFS
+    has_tests: true
+    submodules: true
+    lfs: true
+    release:
+      mode: tag
+      first_version: v1.0.0     # MARKETING_VERSION = 1.0，仓库还没有 tag
+    checks:
+      - id: ios
+        runs_on: macos-26
+        paths: ["Familiar/", "FamiliarTests/", "FamiliarUITests/", "FamiliarShareExtension/", "FamiliarWidgets/",
+                "Shared/", "Scripts/", "Vendor/", "familiar.xcodeproj/"]
+        tools: {}
+        run: |
+          Scripts/verify-ish-supply-chain.sh
+          xcodebuild -project familiar.xcodeproj -scheme Familiar -configuration Debug \
+            -destination 'generic/platform=iOS Simulator' ARCHS=arm64 ONLY_ACTIVE_ARCH=YES \
+            CODE_SIGNING_ALLOWED=NO build
+          SIM=$(xcrun simctl list devices available -j | python3 -c 'import json,sys; d=json.load(sys.stdin)["devices"]; c=[(r,x) for r,v in d.items() if "iOS" in r for x in v if x["name"].startswith("iPhone")]; print(sorted(c,key=lambda i:i[0],reverse=True)[0][1]["udid"])')
+          xcrun simctl boot "$SIM"; xcrun simctl bootstatus "$SIM" -b
+          xcodebuild -project familiar.xcodeproj -scheme Familiar -configuration Debug \
+            -destination "platform=iOS Simulator,id=$SIM" ARCHS=arm64 ONLY_ACTIVE_ARCH=YES \
+            CODE_SIGNING_ALLOWED=NO -only-testing:FamiliarTests test

@@ -1,0 +1,152 @@
+name: cleanup loop
+
+# 每周体检：屎山 / 恶意代码 → 清理 PR（走审查 + /approve）、可疑代码告警 issue、经验 PR
+on:
+  schedule:
+    - cron: "0 2 * * 1"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: cleanup-loop
+  cancel-in-progress: false
+
+env:
+  DRY_RUN: ${{ vars.DRY_RUN || 'true' }}
+  RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  prepare:
+    if: vars.BOT_ENABLED == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      matrix: ${{ steps.p.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - id: bot
+        uses: ./.github/actions/bot-setup
+        with:
+          app-id: ${{ vars.WF_APP_ID }}
+          private-key: ${{ secrets.WF_APP_PRIVATE_KEY }}
+      - id: p
+        run: python -m wf.loops.cleanup prepare
+        env:
+          GH_TOKEN: ${{ steps.bot.outputs.token }}
+          BOT_LOGIN: ${{ steps.bot.outputs.bot-login }}
+
+  analyze:
+    needs: prepare
+    name: analyze ${{ matrix.key }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - run: pip install --disable-pip-version-check -q -r requirements.txt
+      - name: Clone target (anonymous, blobless)
+        env:
+          REPO: ${{ matrix.repo }}
+          BRANCH: ${{ matrix.branch }}
+          GIT_LFS_SKIP_SMUDGE: "1"
+        run: git clone -q --filter=blob:none --branch "$BRANCH" "https://github.com/${REPO}.git" target
+      - id: analyze
+        run: python -m wf.loops.cleanup analyze --repo "$KEY" --workdir target --since "$SINCE" --out "result/${KEY}"
+        env:
+          KEY: ${{ matrix.key }}
+          SINCE: ${{ matrix.since }}
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+      - if: steps.analyze.outputs.needs_fix == 'true'
+        uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+      - if: steps.analyze.outputs.needs_fix == 'true'
+        run: npm install -g opencode-ai@1.19.0
+      - if: steps.analyze.outputs.needs_fix == 'true'
+        name: opencode
+        continue-on-error: true
+        working-directory: target
+        env:
+          KEY: ${{ matrix.key }}
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+          OPENCODE_CONFIG: ${{ github.workspace }}/config/opencode.json
+        run: timeout 40m opencode run "$(cat "../result/${KEY}/fix-prompt.md")" < /dev/null
+      - if: steps.analyze.outputs.needs_fix == 'true'
+        run: python -m wf.loops.cleanup collect --workdir target --out "result/${KEY}"
+        env:
+          KEY: ${{ matrix.key }}
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+      - uses: actions/upload-artifact@v7
+        with:
+          name: cleanup-result-${{ matrix.key }}
+          path: result/
+          retention-days: 14
+
+  publish:
+    needs: [prepare, analyze]
+    if: always() && needs.prepare.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - id: bot
+        uses: ./.github/actions/bot-setup
+        with:
+          app-id: ${{ vars.WF_APP_ID }}
+          private-key: ${{ secrets.WF_APP_PRIVATE_KEY }}
+      - uses: actions/download-artifact@v8
+        continue-on-error: true
+        with:
+          pattern: cleanup-result-*
+          path: cleanup-results
+          merge-multiple: true
+      - run: python -m wf.loops.cleanup publish --results cleanup-results
+        env:
+          GH_TOKEN: ${{ steps.bot.outputs.token }}
+          BOT_LOGIN: ${{ steps.bot.outputs.bot-login }}
+          BOT_USER_ID: ${{ steps.bot.outputs.bot-user-id }}
+
+  alert:
+    needs: [prepare, analyze, publish]
+    if: failure()
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - id: bot
+        uses: ./.github/actions/bot-setup
+        with:
+          app-id: ${{ vars.WF_APP_ID }}
+          private-key: ${{ secrets.WF_APP_PRIVATE_KEY }}
+      - run: python -m wf.loops.alert --workflow "$WORKFLOW"
+        env:
+          DRY_RUN: "false"
+          WORKFLOW: ${{ github.workflow }}
+          GH_TOKEN: ${{ steps.bot.outputs.token }}
+          BOT_LOGIN: ${{ steps.bot.outputs.bot-login }}

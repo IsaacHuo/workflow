@@ -1,0 +1,65 @@
+name: smoke
+
+# 手动触发：验证模型 API、opencode CLI、GitHub App 三条链路都通。全程只读。
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+env:
+  DRY_RUN: "true"
+
+jobs:
+  api:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - run: pip install --disable-pip-version-check -q -r requirements.txt
+      - run: python -m wf.loops.smoke
+        env:
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+
+  opencode:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+      - run: npm install -g opencode-ai@1.19.0
+      - name: opencode run
+        env:
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+          OPENCODE_CONFIG: ${{ github.workspace }}/config/opencode.json
+        run: |
+          mkdir -p /tmp/oc && cd /tmp/oc && git init -q
+          opencode run "只回复两个字母：OK" < /dev/null
+
+  app:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - id: bot
+        uses: ./.github/actions/bot-setup
+        with:
+          app-id: ${{ vars.WF_APP_ID }}
+          private-key: ${{ secrets.WF_APP_PRIVATE_KEY }}
+      - run: python -m wf.loops.ping
+        env:
+          GH_TOKEN: ${{ steps.bot.outputs.token }}
+          BOT_LOGIN: ${{ steps.bot.outputs.bot-login }}
